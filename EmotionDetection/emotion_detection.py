@@ -114,7 +114,7 @@ def _watson_call(text):
         }
     response.raise_for_status()
     data = response.json()
-    emotions = data["emotion_predictions"][0]["emotion"]
+    emotions = data["emotionPredictions"][0]["emotion"]
     result = {
         "anger": emotions["anger"],
         "disgust": emotions["disgust"],
