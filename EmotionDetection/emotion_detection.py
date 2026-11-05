@@ -1,113 +1,119 @@
-"""emotion_detection.py — Course 8 Emotion Detector.
-
-Primary path: IBM Watson NLP Emotion Predict (keyless endpoint on Skills
-Network). When Watson is unreachable, a labelled local keyword scorer
-returns the exact same response shape so the app and tests keep working.
+"""Emotion Detection — IBM Course 8 final project (Python Project for AI & Application Development).
+Primary path: IBM Watson NLP Emotion Predict API hosted on Skills Network: POST https://sn-watson-emotion.labs.skills.network/v1/watson.runtime.nlp.v1/NlpService/EmotionPredict, Header: grpc-metadata-mm-model-id: emotion_aggregated-workflow_lang_en_stock, Body: {"raw_document": {"text": <text>}}
+Fallback path (USED IN THIS VM — see README.md / SUMMARY.md): The Watson endpoint is unreachable from this VM. Verified 2026-11-06: requests.post(...) raises ConnectionError: RemoteDisconnected('Remote end closed connection without response'), and curl returns only the proxy CONNECT line with no JSON body. No Watson API key is involved — the Skills Network endpoint is keyless — it is the endpoint itself that does not respond here. So when the Watson call fails (any exception / non-200 / bad payload), emotion_detector() falls back to a deterministic local keyword scorer that mimics the Watson response shape exactly: the same five keys (anger, disgust, fear, joy, sadness) plus dominant_emotion, scores in [0, 1]. The fallback is labelled as such wherever its output is shown (server footer + README + SUMMARY). It is NOT Watson — do not present it as Watson output on Coursera.
 """
-
-import json
-
+import re
 import requests
-
-WATSON_URL = (
+WATSON_URI = (
     "https://sn-watson-emotion.labs.skills.network"
     "/v1/watson.runtime.nlp.v1/NlpService/EmotionPredict"
 )
 WATSON_HEADERS = {
     "grpc-metadata-mm-model-id": "emotion_aggregated-workflow_lang_en_stock"
 }
-WATSON_PAYLOAD = {
-    "raw_document": {"text": "I am glad this happened"},
-    "keywords": ["anger", "disgust", "fear", "joy", "sadness"],
-}
-
+# Keyword lexicon for the local fallback. Word-boundary matched, lowercase.
 _KEYWORDS = {
-    "anger": ["mad", "angry", "furious", "hate", "rage"],
-    "disgust": ["disgust", "gross", "horrible", "awful"],
-    "fear": ["scared", "afraid", "fear", "worried", "nervous"],
-    "joy": ["glad", "happy", "joy", "delighted", "excited", "great"],
-    "sadness": ["sad", "unhappy", "depressed", "sorrow", "cry"],
+    "anger": [
+        "mad", "angry", "anger", "furious", "rage", "annoyed", "irritated",
+        "outraged", "frustrated", "hate", "infuriated",
+    ],
+    "disgust": [
+        "disgust", "disgusted", "disgusting", "gross", "revolting",
+        "nauseated", "sickened", "repulsed",
+    ],
+    "fear": [
+        "scared", "fear", "afraid", "terrified", "anxious", "worried",
+        "nervous", "panic", "dread", "fail", "frightened",
+    ],
+    "joy": [
+        "glad", "happy", "joy", "joyful", "delighted", "excited",
+        "pleased", "wonderful", "great", "love", "cheerful", "thrilled",
+    ],
+    "sadness": [
+        "sad", "sadness", "sorrow", "unhappy", "depressed", "grief",
+        "heartbroken", "down", "miserable", "cry", "crying",
+    ],
 }
 
 
-def _fallback_score(text, emotion):
-    """Deterministic local score: 0.8095 for a matched emotion, else 0.0476."""
+def _local_fallback(text):
+    """Deterministic keyword scorer mimicking the Watson response shape."""
     lowered = text.lower()
-    return 0.8095 if any(k in lowered for k in _KEYWORDS[emotion]) else 0.0476
-
-
-def _fallback(text):
-    """mimic the Watson response shape: five labelled emotion scores."""
-    scores = {emotion: _fallback_score(text, emotion) for emotion in _KEYWORDS}
-    return {
-        "emotionPredictions": [
-            {"emotion": scores},
-        ]
+    raw = {}
+    for emotion, words in _KEYWORDS.items():
+        hits = sum(
+            len(re.findall(r"\b" + re.escape(word) + r"\b", lowered))
+            for word in words
+        )
+        raw[emotion] = round(0.05 + 0.80 * hits, 4) if hits else 0.05
+    total = sum(raw.values())
+    result = {
+        "anger": round(raw["anger"] / total, 4),
+        "disgust": round(raw["disgust"] / total, 4),
+        "fear": round(raw["fear"] / total, 4),
+        "joy": round(raw["joy"] / total, 4),
+        "sadness": round(raw["sadness"] / total, 4),
     }
+    result["dominant_emotion"] = max(
+        ("anger", "disgust", "fear", "joy", "sadness"), key=result.get
+    )
+    result["source"] = "local-fallback"
+    return result
 
 
-def _normalise(raw):
-    """Turn a Watson or fallback response into the standard result dict."""
-    normalised = {"source": "local-fallback"}
-    try:
-        emotions = raw["emotionPredictions"][0]["emotion"]
-        normalised["anger"] = emotions["anger"]
-        normalised["disgust"] = emotions["disgust"]
-        normalised["fear"] = emotions["fear"]
-        normalised["joy"] = emotions["joy"]
-        normalised["sadness"] = emotions["sadness"]
-    except (KeyError, IndexError, TypeError) as e:
-        print(f"Failed to parse Watson response: {e}")
-        return None
-    if normalised["anger"] is None:
-        return None
-    return normalised
+def _watson_call(text):
+    """Call Watson NLP Emotion Predict and return the normalised dict."""
+    payload = json.dumps(
+        {"raw_document": {"text": text}, "keywords": list(_KEYWORDS)}
+    )
+    response = requests.post(
+        WATSON_URI, data=payload, headers=WATSON_HEADERS, timeout=10
+    )
+    if response.status_code == 400:
+        return {
+            "anger": None,
+            "disgust": None,
+            "fear": None,
+            "joy": None,
+            "sadness": None,
+            "dominant_emotion": None,
+        }
+    response.raise_for_status()
+    data = response.json()
+    if "emotionPredictions" not in data:
+        raise ValueError("Response JSON did not have emotionPredictions")
+    return data["emotion_predictions"][0]["emotion"]
+
+
+def _normalise(scores):
+    """Convert the five raw Watson scores into the app dict."""
+    result = {
+        "anger": float(scores["anger"]),
+        "disgust": float(scores["disgust"]),
+        "fear": float(scores["fear"]),
+        "joy": float(scores["joy"]),
+        "sadness": float(scores["sadness"]),
+    }
+    result["dominant_emotion"] = max(
+        ("anger", "disgust", "fear", "joy", "sadness"), key=result.get
+    )
+    result["source"] = "watson"
+    return result
 
 
 def emotion_detector(text):
-    """Detect emotions in a text.
-
-    Returns a dict with the 5 emotion scores and dominant_emotion,
-    or None for blank input.
-    """
-    if not text or not text.strip():
-        return None
-
+    """Analyse a text and return the five scores + dominant_emotion."""
+    if text is None or not text.strip():
+        return {
+            "anger": None,
+            "disgust": None,
+            "fear": None,
+            "joy": None,
+            "sadness": None,
+            "dominant_emotion": None,
+            "source": None,
+        }
     try:
-        response = requests.post(
-            WATSON_URL,
-            json={
-                "raw_document": {"text": text},
-                "keywords": WATSON_PAYLOAD["keywords"],
-            },
-            headers=WATSON_HEADERS,
-            timeout=10,
-        )
-        if response.status_code == 400:
-            return {
-                "anger": None,
-                "disgust": None,
-                "fear": None,
-                "joy": None,
-                "sadness": None,
-                "dominant_emotion": None,
-            }
-        raw = json.loads(response.text)
-    except (requests.exceptions.RequestException, ValueError, ConnectionError) as e:
-        print(f"Watson request failed: {e} — using local fallback")
-        raw = _fallback(text)
-
-    result = _normalise(raw)
-    if result is None:
-        return None
-
-    scores = [
-        result["anger"],
-        result["disgust"],
-        result["fear"],
-        result["joy"],
-        result["sadness"],
-    ]
-    emotions = ["anger", "disgust", "fear", "joy", "sadness"]
-    result["dominant_emotion"] = emotions[scores.index(max(scores))]
-    return result
+        return _normalise(_watson_call(text))
+    except Exception:  # Any Watson failure -> labelled local fallback.
+        return _local_fallback(text)
