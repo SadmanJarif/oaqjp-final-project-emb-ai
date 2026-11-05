@@ -1,4 +1,4 @@
-# Emotion Detector — IBM Course 8 Final Project
+# Final Project
 
 Python Flask app that analyses the emotions in a statement (anger, disgust,
 fear, joy, sadness) and reports the dominant emotion. IBM Full Stack Software
